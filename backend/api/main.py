@@ -197,28 +197,92 @@ def _new_plan(db, task):
 
 
 def start_run(task_id: str, plan_id: str | None = None, trigger="manual", options: dict | None = None):
+
     with SessionLocal() as db:
+
         task = db.get(Task, task_id)
+
         if not task:
             raise HTTPException(404, "Task not found")
-        running = db.query(Run).filter(Run.task_id == task_id, Run.state.notin_(list(TERMINAL) + ["awaiting_approval"])).first()
+
+        running = db.query(Run).filter(
+            Run.task_id == task_id,
+            Run.state.notin_(list(TERMINAL) + ["awaiting_approval"])
+        ).first()
+
         if running:
-            raise HTTPException(409, f"Run {running.id} is already in progress for this task")
+            raise HTTPException(
+                409,
+                f"Run {running.id} is already in progress for this task"
+            )
+
         plan = db.get(Plan, plan_id) if plan_id else (
-            db.query(Plan).filter(Plan.task_id == task_id).order_by(Plan.created_at.desc()).first())
-        if not plan or plan.status == "rejected":
+            db.query(Plan)
+            .filter(Plan.task_id == task_id)
+            .order_by(Plan.created_at.desc())
+            .first()
+        )
+
+        # Existing plans may contain URLs from an older deployment.
+        # Rebuild the plan if it still points to localhost.
+        stale_plan = False
+
+        if plan:
+            plan_text = json.dumps(plan.steps or {}, default=str)
+            stale_plan = (
+                "127.0.0.1:8000" in plan_text
+                or "localhost:8000" in plan_text
+            )
+
+        if not plan or plan.status == "rejected" or stale_plan:
             plan = _new_plan(db, task)
-        opts = {"headed": settings.default_headed, "speed": settings.default_speed, "step_mode": False}
-        opts.update({k: v for k, v in (options or {}).items() if v is not None})
-        run = Run(task_id=task_id, plan_id=plan.id, trigger=trigger, state="task_intake", options=opts)
+
+        opts = {
+            "headed": settings.default_headed,
+            "speed": settings.default_speed,
+            "step_mode": False
+        }
+
+        opts.update({
+            k: v
+            for k, v in (options or {}).items()
+            if v is not None
+        })
+
+        run = Run(
+            task_id=task_id,
+            plan_id=plan.id,
+            trigger=trigger,
+            state="task_intake",
+            options=opts
+        )
+
         db.add(run)
         db.commit()
-        db.add(RunEvent(run_id=run.id, kind="state", message="State -> task_intake"))
-        db.add(RunEvent(run_id=run.id, kind="state", message=f"State -> plan_generated ({plan.planner} planner, {plan.status})"))
+
+        db.add(
+            RunEvent(
+                run_id=run.id,
+                kind="state",
+                message="State -> task_intake"
+            )
+        )
+
+        db.add(
+            RunEvent(
+                run_id=run.id,
+                kind="state",
+                message=f"State -> plan_generated ({plan.planner} planner, {plan.status})"
+            )
+        )
+
         run.state = "plan_generated"
         db.commit()
+
         rid = run.id
+
     submit(rid)
+
     return rid
 
 

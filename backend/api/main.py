@@ -241,14 +241,35 @@ def seed():
     path = os.path.join(ROOT, "data", "sample_task_templates.json")
     with open(path, encoding="utf-8") as f:
         templates = json.load(f)
+
     with SessionLocal() as db:
-        have = {n for (n,) in db.query(Task.name).all()}
-        for t in templates:
-            if t["name"] in have:
+        existing = {t.name: t for t in db.query(Task).all()}
+
+        for template in templates:
+            name = template["name"]
+            target_urls = [
+                u.replace("{BASE}", settings.public_base_url)
+                for u in template["target_urls"]
+            ]
+
+            if name in existing:
+                task = existing[name]
+
+                # Refresh URLs for seeded workflows so deployments do not
+                # keep stale localhost/127.0.0.1 addresses.
+                task.target_urls = target_urls
                 continue
-            t = dict(t)
-            t["target_urls"] = [u.replace("{BASE}", settings.public_base_url) for u in t["target_urls"]]
-            db.add(Task(**t, next_run_at=compute_next(t["schedule"])))
+
+            task_data = dict(template)
+            task_data["target_urls"] = target_urls
+
+            db.add(
+                Task(
+                    **task_data,
+                    next_run_at=compute_next(template["schedule"])
+                )
+            )
+
         db.commit()
 
 

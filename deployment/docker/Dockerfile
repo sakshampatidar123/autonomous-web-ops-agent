@@ -3,6 +3,7 @@ FROM mcr.microsoft.com/playwright/python:v1.47.0-jammy
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m playwright install chromium
 COPY . .
 ENV BROWSER_ENGINE=playwright PYTHONUNBUFFERED=1
 EXPOSE 8000

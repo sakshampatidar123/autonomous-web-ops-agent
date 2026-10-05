@@ -10,7 +10,6 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func
 
 from agents.planner.planner import build_plan
 from agents.planner.workflows import TOOLS, WORKFLOWS, catalog
@@ -38,6 +37,7 @@ from backend.jobs.orchestrator import (
     STATES,
     TERMINAL,
     active_runs,
+    cancel_queued_run,
     compute_next,
     start_scheduler,
     submit,
@@ -72,7 +72,13 @@ if os.getenv("LOG_POLLING", "false").lower() != "true":
     logging.getLogger("uvicorn.access").addFilter(_QuietPolling())
 
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(
+    os.path.dirname(
+        os.path.dirname(
+            os.path.abspath(__file__)
+        )
+    )
+)
 
 
 @asynccontextmanager
@@ -87,12 +93,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 app.include_router(travel_router)
 app.include_router(mock_router)
@@ -107,7 +115,8 @@ async def trace_id(request: Request, call_next):
     return resp
 
 
-# ------------------------------------------------------------------ schemas
+# ------------------------------------------------------------------
+# schemas
 
 
 class TaskIn(BaseModel):
@@ -177,14 +186,21 @@ class FeedbackIn(BaseModel):
     note: str | None = None
 
 
-# ------------------------------------------------------------------ serializers
+# ------------------------------------------------------------------
+# serializers
 
 
 def ser(obj, *fields):
     out = {}
+
     for f in fields:
         v = getattr(obj, f)
-        out[f] = v.isoformat() if isinstance(v, datetime) else v
+        out[f] = (
+            v.isoformat()
+            if isinstance(v, datetime)
+            else v
+        )
+
     return out
 
 
@@ -205,6 +221,7 @@ TASK_F = (
     "inputs",
 )
 
+
 PLAN_F = (
     "id",
     "task_id",
@@ -218,6 +235,7 @@ PLAN_F = (
     "approved_by",
     "created_at",
 )
+
 
 RUN_F = (
     "id",
@@ -239,7 +257,8 @@ RUN_F = (
 )
 
 
-# ------------------------------------------------------------------ helpers
+# ------------------------------------------------------------------
+# helpers
 
 
 def validate_task(t: TaskIn):
@@ -252,15 +271,21 @@ def validate_task(t: TaskIn):
             f"Unknown workflow type '{t.template}'. "
             f"Use one of: {', '.join(WORKFLOWS)}"
         )
+
     else:
         if not t.target_urls:
             t.target_urls = [
-                u.replace("{BASE}", settings.public_base_url)
+                u.replace(
+                    "{BASE}",
+                    settings.public_base_url,
+                )
                 for u in wf.get("default_urls", [])
             ]
 
         if not t.target_urls and t.template != "custom":
-            problems.append("Add at least one source URL")
+            problems.append(
+                "Add at least one source URL"
+            )
 
         if t.template == "custom":
             steps = t.inputs.get("steps")
@@ -270,6 +295,7 @@ def validate_task(t: TaskIn):
                     "Custom workflows need inputs.steps: "
                     "a list of {tool, target?, args, purpose}"
                 )
+
             else:
                 bad = [
                     s.get("tool")
@@ -285,16 +311,26 @@ def validate_task(t: TaskIn):
                 t.target_urls = t.target_urls or [
                     s["target"]
                     for s in steps
-                    if s.get("tool") == "navigate" and s.get("target")
+                    if (
+                        s.get("tool") == "navigate"
+                        and s.get("target")
+                    )
                 ]
 
-        if wf["kind"] == "transaction" and t.schedule != "once":
+        if (
+            wf["kind"] == "transaction"
+            and t.schedule != "once"
+        ):
             problems.append(
                 "Transactions (like bookings) can only run on demand, "
                 "never on a schedule"
             )
 
-    blocked = [u for u in t.target_urls if not policy.is_allowed(u)]
+    blocked = [
+        u
+        for u in t.target_urls
+        if not policy.is_allowed(u)
+    ]
 
     if blocked:
         problems.append(
@@ -326,19 +362,31 @@ def validate_task(t: TaskIn):
 def _new_plan(db, task):
     try:
         plan_out, cost = build_plan(task)
+
     except ValueError as e:
         raise HTTPException(422, str(e))
 
     plan = Plan(
         task_id=task.id,
-        steps=[s.model_dump() for s in plan_out.steps],
+        steps=[
+            s.model_dump()
+            for s in plan_out.steps
+        ],
         tools=plan_out.tools,
         extraction_schema=plan_out.extraction_schema,
         risks=plan_out.risks,
         stop_conditions=plan_out.stop_conditions,
         planner=plan_out.planner,
-        status="draft" if task.requires_approval else "approved",
-        approved_by=None if task.requires_approval else "auto (non-sensitive)",
+        status=(
+            "draft"
+            if task.requires_approval
+            else "approved"
+        ),
+        approved_by=(
+            None
+            if task.requires_approval
+            else "auto (non-sensitive)"
+        ),
     )
 
     db.add(plan)
@@ -358,13 +406,19 @@ def start_run(
         task = db.get(Task, task_id)
 
         if not task:
-            raise HTTPException(404, "Task not found")
+            raise HTTPException(
+                404,
+                "Task not found",
+            )
 
         running = (
             db.query(Run)
             .filter(
                 Run.task_id == task_id,
-                Run.state.notin_(list(TERMINAL) + ["awaiting_approval"]),
+                Run.state.notin_(
+                    list(TERMINAL)
+                    + ["awaiting_approval"]
+                ),
             )
             .first()
         )
@@ -380,8 +434,12 @@ def start_run(
             if plan_id
             else (
                 db.query(Plan)
-                .filter(Plan.task_id == task_id)
-                .order_by(Plan.created_at.desc())
+                .filter(
+                    Plan.task_id == task_id
+                )
+                .order_by(
+                    Plan.created_at.desc()
+                )
                 .first()
             )
         )
@@ -389,14 +447,21 @@ def start_run(
         stale_plan = False
 
         if plan:
-            plan_text = json.dumps(plan.steps or {}, default=str)
+            plan_text = json.dumps(
+                plan.steps or {},
+                default=str,
+            )
 
             stale_plan = (
                 "127.0.0.1:8000" in plan_text
                 or "localhost:8000" in plan_text
             )
 
-        if not plan or plan.status == "rejected" or stale_plan:
+        if (
+            not plan
+            or plan.status == "rejected"
+            or stale_plan
+        ):
             plan = _new_plan(db, task)
 
         opts = {
@@ -453,43 +518,70 @@ def start_run(
     return rid
 
 
-# ------------------------------------------------------------------ lifecycle
+# ------------------------------------------------------------------
+# lifecycle
 
 
 def startup():
-    os.makedirs(settings.snapshot_dir, exist_ok=True)
+    os.makedirs(
+        settings.snapshot_dir,
+        exist_ok=True,
+    )
+
     init_db()
     seed()
-    start_scheduler(lambda tid, trigger: _safe_start(tid, trigger))
+
+    start_scheduler(
+        lambda tid, trigger: _safe_start(
+            tid,
+            trigger,
+        )
+    )
 
 
 def _safe_start(tid, trigger):
     try:
-        start_run(tid, trigger=trigger)
+        start_run(
+            tid,
+            trigger=trigger,
+        )
+
     except HTTPException:
         pass
 
 
 def seed():
-    path = os.path.join(ROOT, "data", "sample_task_templates.json")
+    path = os.path.join(
+        ROOT,
+        "data",
+        "sample_task_templates.json",
+    )
 
-    with open(path, encoding="utf-8") as f:
+    with open(
+        path,
+        encoding="utf-8",
+    ) as f:
         templates = json.load(f)
 
     with SessionLocal() as db:
-        existing = {t.name: t for t in db.query(Task).all()}
+        existing = {
+            t.name: t
+            for t in db.query(Task).all()
+        }
 
         for template in templates:
             name = template["name"]
 
             target_urls = [
-                u.replace("{BASE}", settings.public_base_url)
+                u.replace(
+                    "{BASE}",
+                    settings.public_base_url,
+                )
                 for u in template["target_urls"]
             ]
 
             if name in existing:
                 task = existing[name]
-
                 task.target_urls = target_urls
                 continue
 
@@ -499,14 +591,17 @@ def seed():
             db.add(
                 Task(
                     **task_data,
-                    next_run_at=compute_next(template["schedule"]),
+                    next_run_at=compute_next(
+                        template["schedule"]
+                    ),
                 )
             )
 
         db.commit()
 
 
-# ------------------------------------------------------------------ tasks & templates
+# ------------------------------------------------------------------
+# tasks & templates
 
 
 @app.get("/api/health")
@@ -515,8 +610,8 @@ def health():
 
     try:
         import playwright  # noqa: F401
-
         pw = True
+
     except ImportError:
         pw = False
 
@@ -552,16 +647,28 @@ def workflows():
     out = []
 
     for w in catalog():
-        sch = SCHEMAS.get(w.get("schema") or "")
+        sch = SCHEMAS.get(
+            w.get("schema") or ""
+        )
 
         out.append(
             {
                 **w,
                 "default_urls": [
-                    u.replace("{BASE}", settings.public_base_url)
-                    for u in w.get("default_urls", [])
+                    u.replace(
+                        "{BASE}",
+                        settings.public_base_url,
+                    )
+                    for u in w.get(
+                        "default_urls",
+                        [],
+                    )
                 ],
-                "fields": list(sch.fields) if sch else [],
+                "fields": (
+                    list(sch.fields)
+                    if sch
+                    else []
+                ),
             }
         )
 
@@ -586,20 +693,31 @@ def create_task(
         t = Task(
             **body.model_dump(),
             created_by=role,
-            next_run_at=compute_next(body.schedule),
+            next_run_at=compute_next(
+                body.schedule
+            ),
         )
 
         if not t.expected_fields:
             sch = SCHEMAS.get(
-                WORKFLOWS[body.template].get("schema") or ""
+                WORKFLOWS[
+                    body.template
+                ].get("schema") or ""
             )
 
-            t.expected_fields = list(sch.fields) if sch else []
+            t.expected_fields = (
+                list(sch.fields)
+                if sch
+                else []
+            )
 
         db.add(t)
         db.commit()
 
-        return ser(t, *TASK_F)
+        return ser(
+            t,
+            *TASK_F,
+        )
 
 
 @app.get("/api/tasks")
@@ -607,20 +725,38 @@ def list_tasks():
     with SessionLocal() as db:
         out = []
 
-        for t in db.query(Task).order_by(Task.created_at).all():
-            d = ser(t, *TASK_F)
+        for t in (
+            db.query(Task)
+            .order_by(Task.created_at)
+            .all()
+        ):
+            d = ser(
+                t,
+                *TASK_F,
+            )
 
             last = (
                 db.query(Run)
-                .filter(Run.task_id == t.id)
-                .order_by(Run.created_at.desc())
+                .filter(
+                    Run.task_id == t.id
+                )
+                .order_by(
+                    Run.created_at.desc()
+                )
                 .first()
             )
 
-            d["last_run"] = ser(last, *RUN_F) if last else None
+            d["last_run"] = (
+                ser(last, *RUN_F)
+                if last
+                else None
+            )
+
             d["run_count"] = (
                 db.query(Run)
-                .filter(Run.task_id == t.id)
+                .filter(
+                    Run.task_id == t.id
+                )
                 .count()
             )
 
@@ -638,10 +774,16 @@ def update_task(
     require(role, "task:write")
 
     with SessionLocal() as db:
-        t = db.get(Task, task_id)
+        t = db.get(
+            Task,
+            task_id,
+        )
 
         if not t:
-            raise HTTPException(404, "Task not found")
+            raise HTTPException(
+                404,
+                "Task not found",
+            )
 
         for k in (
             "schedule",
@@ -652,17 +794,27 @@ def update_task(
             "inputs",
         ):
             if k in body:
-                setattr(t, k, body[k])
+                setattr(
+                    t,
+                    k,
+                    body[k],
+                )
 
         if "schedule" in body:
-            t.next_run_at = compute_next(t.schedule)
+            t.next_run_at = compute_next(
+                t.schedule
+            )
 
         db.commit()
 
-        return ser(t, *TASK_F)
+        return ser(
+            t,
+            *TASK_F,
+        )
 
 
-# ------------------------------------------------------------------ plans
+# ------------------------------------------------------------------
+# plans
 
 
 @app.post("/api/plans", status_code=201)
@@ -673,23 +825,44 @@ def create_plan(
     require(role, "plan:write")
 
     with SessionLocal() as db:
-        task = db.get(Task, body.task_id)
+        task = db.get(
+            Task,
+            body.task_id,
+        )
 
         if not task:
-            raise HTTPException(404, "Task not found")
+            raise HTTPException(
+                404,
+                "Task not found",
+            )
 
-        return ser(_new_plan(db, task), *PLAN_F)
+        return ser(
+            _new_plan(
+                db,
+                task,
+            ),
+            *PLAN_F,
+        )
 
 
 @app.get("/api/plans/{plan_id}")
 def get_plan(plan_id: str):
     with SessionLocal() as db:
-        p = db.get(Plan, plan_id)
+        p = db.get(
+            Plan,
+            plan_id,
+        )
 
         if not p:
-            raise HTTPException(404, "Plan not found")
+            raise HTTPException(
+                404,
+                "Plan not found",
+            )
 
-        return ser(p, *PLAN_F)
+        return ser(
+            p,
+            *PLAN_F,
+        )
 
 
 @app.post("/api/plans/{plan_id}/approve")
@@ -701,12 +874,23 @@ def approve_plan(
     require(role, "plan:approve")
 
     with SessionLocal() as db:
-        p = db.get(Plan, plan_id)
+        p = db.get(
+            Plan,
+            plan_id,
+        )
 
         if not p:
-            raise HTTPException(404, "Plan not found")
+            raise HTTPException(
+                404,
+                "Plan not found",
+            )
 
-        p.status = "approved" if body.approve else "rejected"
+        p.status = (
+            "approved"
+            if body.approve
+            else "rejected"
+        )
+
         p.approved_by = role
 
         waiting = (
@@ -721,6 +905,7 @@ def approve_plan(
         for r in waiting:
             if body.approve:
                 r.state = "plan_generated"
+
             else:
                 r.state = "failed"
                 r.error = "Plan rejected by reviewer"
@@ -730,13 +915,18 @@ def approve_plan(
                 RunEvent(
                     run_id=r.id,
                     kind="policy",
-                    message=f"Plan {p.status} by {role}",
+                    message=(
+                        f"Plan {p.status} by {role}"
+                    ),
                 )
             )
 
         db.commit()
 
-        ids = [r.id for r in waiting]
+        ids = [
+            r.id
+            for r in waiting
+        ]
 
     if body.approve:
         for rid in ids:
@@ -744,12 +934,17 @@ def approve_plan(
 
     return {
         "plan_id": plan_id,
-        "status": "approved" if body.approve else "rejected",
+        "status": (
+            "approved"
+            if body.approve
+            else "rejected"
+        ),
         "resumed_runs": ids,
     }
 
 
-# ------------------------------------------------------------------ runs
+# ------------------------------------------------------------------
+# runs
 
 
 @app.post("/api/runs", status_code=202)
@@ -777,24 +972,39 @@ def list_runs(
         q = db.query(Run)
 
         if task_id:
-            q = q.filter(Run.task_id == task_id)
+            q = q.filter(
+                Run.task_id == task_id
+            )
 
         out = []
 
         for r in (
-            q.order_by(Run.created_at.desc())
+            q.order_by(
+                Run.created_at.desc()
+            )
             .limit(limit)
         ):
-            d = ser(r, *RUN_F)
+            d = ser(
+                r,
+                *RUN_F,
+            )
+
             d["task_name"] = r.task.name
 
             s = (
                 db.query(Summary)
-                .filter(Summary.run_id == r.id)
+                .filter(
+                    Summary.run_id == r.id
+                )
                 .first()
             )
 
-            d["headline"] = s.headline if s else None
+            d["headline"] = (
+                s.headline
+                if s
+                else None
+            )
+
             out.append(d)
 
         return out
@@ -806,17 +1016,35 @@ def get_run(
     since_event: int = 0,
 ):
     with SessionLocal() as db:
-        r = db.get(Run, run_id)
+        r = db.get(
+            Run,
+            run_id,
+        )
 
         if not r:
-            raise HTTPException(404, "Run not found")
+            raise HTTPException(
+                404,
+                "Run not found",
+            )
 
-        d = ser(r, *RUN_F)
+        d = ser(
+            r,
+            *RUN_F,
+        )
 
-        d["task"] = ser(r.task, *TASK_F)
+        d["task"] = ser(
+            r.task,
+            *TASK_F,
+        )
 
         d["plan"] = (
-            ser(db.get(Plan, r.plan_id), *PLAN_F)
+            ser(
+                db.get(
+                    Plan,
+                    r.plan_id,
+                ),
+                *PLAN_F,
+            )
             if r.plan_id
             else None
         )
@@ -835,7 +1063,9 @@ def get_run(
                     RunEvent.run_id == run_id,
                     RunEvent.id > since_event,
                 )
-                .order_by(RunEvent.id)
+                .order_by(
+                    RunEvent.id
+                )
             )
         ]
 
@@ -849,10 +1079,16 @@ def get_run(
                 "content_hash",
                 "captured_at",
             )
-            | {"has_screenshot": bool(s.screenshot_path)}
+            | {
+                "has_screenshot": bool(
+                    s.screenshot_path
+                )
+            }
             for s in (
                 db.query(Snapshot)
-                .filter(Snapshot.run_id == run_id)
+                .filter(
+                    Snapshot.run_id == run_id
+                )
             )
         ]
 
@@ -872,7 +1108,9 @@ def get_run(
             )
             for x in (
                 db.query(ExtractedRecord)
-                .filter(ExtractedRecord.run_id == run_id)
+                .filter(
+                    ExtractedRecord.run_id == run_id
+                )
             )
         ]
 
@@ -893,13 +1131,17 @@ def get_run(
             )
             for c in (
                 db.query(Comparison)
-                .filter(Comparison.run_id == run_id)
+                .filter(
+                    Comparison.run_id == run_id
+                )
             )
         ]
 
         s = (
             db.query(Summary)
-            .filter(Summary.run_id == run_id)
+            .filter(
+                Summary.run_id == run_id
+            )
             .first()
         )
 
@@ -931,7 +1173,9 @@ def get_run(
             )
             for f in (
                 db.query(Feedback)
-                .filter(Feedback.run_id == run_id)
+                .filter(
+                    Feedback.run_id == run_id
+                )
             )
         ]
 
@@ -943,12 +1187,21 @@ def export_csv(run_id: str):
     with SessionLocal() as db:
         s = (
             db.query(Summary)
-            .filter(Summary.run_id == run_id)
+            .filter(
+                Summary.run_id == run_id
+            )
             .first()
         )
 
-        if not s or not s.export_path or not os.path.exists(s.export_path):
-            raise HTTPException(404, "No export for this run yet")
+        if (
+            not s
+            or not s.export_path
+            or not os.path.exists(s.export_path)
+        ):
+            raise HTTPException(
+                404,
+                "No export for this run yet",
+            )
 
         return FileResponse(
             s.export_path,
@@ -963,19 +1216,33 @@ def export_csv(run_id: str):
 )
 def snapshot_html(snapshot_id: str):
     with SessionLocal() as db:
-        s = db.get(Snapshot, snapshot_id)
+        s = db.get(
+            Snapshot,
+            snapshot_id,
+        )
 
         if not s:
-            raise HTTPException(404, "Snapshot not found")
+            raise HTTPException(
+                404,
+                "Snapshot not found",
+            )
 
-        with open(s.html_path, encoding="utf-8") as f:
+        with open(
+            s.html_path,
+            encoding="utf-8",
+        ) as f:
             return f.read()
 
 
-@app.get("/api/snapshots/{snapshot_id}/screenshot")
+@app.get(
+    "/api/snapshots/{snapshot_id}/screenshot"
+)
 def snapshot_shot(snapshot_id: str):
     with SessionLocal() as db:
-        s = db.get(Snapshot, snapshot_id)
+        s = db.get(
+            Snapshot,
+            snapshot_id,
+        )
 
         if not s or not s.screenshot_path:
             raise HTTPException(
@@ -989,7 +1256,8 @@ def snapshot_shot(snapshot_id: str):
         )
 
 
-# ------------------------------------------------------------------ SAFE STALE RUN CLEANUP
+# ------------------------------------------------------------------
+# SAFE STALE RUN CLEANUP
 
 
 @app.post("/api/admin/cleanup-stale-runs")
@@ -1009,7 +1277,10 @@ def cleanup_stale_runs(
       - confirm=true
     """
 
-    if not authorization or not authorization.lower().startswith("bearer "):
+    if (
+        not authorization
+        or not authorization.lower().startswith("bearer ")
+    ):
         raise HTTPException(
             401,
             "Explicit admin bearer token required",
@@ -1023,12 +1294,13 @@ def cleanup_stale_runs(
             "older_than_hours must be at least 1",
         )
 
-    cutoff = now() - timedelta(hours=older_than_hours)
+    cutoff = (
+        now()
+        - timedelta(
+            hours=older_than_hours
+        )
+    )
 
-    # These are genuinely non-terminal execution states.
-    #
-    # awaiting_approval is intentionally excluded because a run may
-    # legitimately wait for a human reviewer.
     stale_states = {
         "task_intake",
         "plan_generated",
@@ -1040,7 +1312,6 @@ def cleanup_stale_runs(
         "completion",
     }
 
-    # Runs currently executing in this server process must never be deleted.
     currently_active = active_runs()
 
     with SessionLocal() as db:
@@ -1052,7 +1323,9 @@ def cleanup_stale_runs(
                 Run.state.in_(stale_states),
                 Run.finished_at.is_(None),
             )
-            .order_by(Run.created_at.asc())
+            .order_by(
+                Run.created_at.asc()
+            )
             .all()
         )
 
@@ -1072,14 +1345,15 @@ def cleanup_stale_runs(
                     else None
                 ),
                 "task_id": r.task_id,
-                "task_name": r.task.name if r.task else None,
+                "task_name": (
+                    r.task.name
+                    if r.task
+                    else None
+                ),
             }
             for r in runs
         ]
 
-        # --------------------------------------------------------------
-        # DRY RUN
-        # --------------------------------------------------------------
         if not confirm:
             return {
                 "dry_run": True,
@@ -1093,15 +1367,11 @@ def cleanup_stale_runs(
                 ),
             }
 
-        # --------------------------------------------------------------
-        # DELETE
-        # --------------------------------------------------------------
         deleted = 0
 
         for run in runs:
             run_id = run.id
 
-            # Delete dependent records first because they reference Run.
             db.query(RunEvent).filter(
                 RunEvent.run_id == run_id
             ).delete(
@@ -1154,21 +1424,308 @@ def cleanup_stale_runs(
         }
 
 
-# ------------------------------------------------------------------ standalone pipeline stages
+# ------------------------------------------------------------------
+# QUEUED RUN CANCELLATION
+#
+# IMPORTANT:
+# These endpoints cancel the executor Future first.
+# We do NOT simply change the database state because that would
+# allow the queued ThreadPoolExecutor job to start later.
+# ------------------------------------------------------------------
+
+
+@app.post("/api/runs/{run_id}/cancel")
+def cancel_run(
+    run_id: str,
+    role: str = Depends(current_role),
+):
+    """
+    Cancel a queued run safely.
+
+    For queued runs:
+        cancel the ThreadPoolExecutor Future.
+
+    For a currently running browser:
+        request browser stop through hub.control().
+
+    Finished runs are not modified.
+    """
+
+    require(role, "run:write")
+
+    with SessionLocal() as db:
+        run = db.get(
+            Run,
+            run_id,
+        )
+
+        if not run:
+            raise HTTPException(
+                404,
+                "Run not found",
+            )
+
+        state = run.state
+
+        if state in TERMINAL:
+            return {
+                "run_id": run_id,
+                "status": "already_finished",
+                "state": state,
+                "message": (
+                    f"Run is already {state}."
+                ),
+            }
+
+    # --------------------------------------------------------------
+    # QUEUED RUN
+    # --------------------------------------------------------------
+
+    if state in {
+        "task_intake",
+        "plan_generated",
+    }:
+        cancelled = cancel_queued_run(
+            run_id
+        )
+
+        if cancelled:
+            with SessionLocal() as db:
+                run = db.get(
+                    Run,
+                    run_id,
+                )
+
+                if (
+                    run
+                    and run.state not in TERMINAL
+                ):
+                    run.state = "stopped"
+                    run.error = "Cancelled while queued"
+                    run.finished_at = now()
+
+                    db.add(
+                        RunEvent(
+                            run_id=run_id,
+                            kind="control",
+                            message=(
+                                f"Queued run cancelled by {role}"
+                            ),
+                        )
+                    )
+
+                    db.commit()
+
+            return {
+                "run_id": run_id,
+                "status": "cancelled",
+                "state": "stopped",
+                "mode": "queued",
+                "message": (
+                    "Queued run cancelled successfully."
+                ),
+            }
+
+        # The Future may have started between the database
+        # check and cancel_queued_run().
+        # The orchestrator will use its cancellation flag
+        # at the next safe checkpoint.
+        return {
+            "run_id": run_id,
+            "status": "cancellation_requested",
+            "state": state,
+            "mode": "starting",
+            "message": (
+                "The run has started executing and could not be "
+                "cancelled directly from the executor queue. "
+                "The orchestrator will stop it at the next "
+                "safe cancellation checkpoint."
+            ),
+        }
+
+    # --------------------------------------------------------------
+    # RUNNING BROWSER
+    # --------------------------------------------------------------
+
+    if state in {
+        "browser_execution",
+        "awaiting_input",
+        "extraction",
+        "comparison",
+        "reasoning",
+        "completion",
+    }:
+        ctl = hub.control(
+            run_id
+        )
+
+        if not ctl:
+            raise HTTPException(
+                409,
+                "This run is active but browser control is unavailable",
+            )
+
+        try:
+            ctl.command("stop")
+
+        except ValueError as e:
+            raise HTTPException(
+                422,
+                str(e),
+            )
+
+        with SessionLocal() as db:
+            db.add(
+                RunEvent(
+                    run_id=run_id,
+                    kind="control",
+                    message=(
+                        f"Stop requested by {role}"
+                    ),
+                )
+            )
+
+            db.commit()
+
+        return {
+            "run_id": run_id,
+            "status": "stop_requested",
+            "mode": "running",
+            "message": (
+                "Stop requested for the running browser workflow."
+            ),
+        }
+
+    raise HTTPException(
+        409,
+        f"Run cannot be cancelled from state '{state}'",
+    )
+
+
+@app.post("/api/admin/cancel-queued-runs")
+def cancel_queued_runs(
+    authorization: str | None = Header(default=None),
+    role: str = Depends(current_role),
+):
+    """
+    Cancel all runs that are currently waiting in the executor queue.
+
+    Only task_intake and plan_generated runs are targeted.
+
+    Currently running browser workflows are NOT stopped by this
+    endpoint.
+    """
+
+    if (
+        not authorization
+        or not authorization.lower().startswith("bearer ")
+    ):
+        raise HTTPException(
+            401,
+            "Explicit admin bearer token required",
+        )
+
+    require(role, "admin")
+
+    with SessionLocal() as db:
+        queued_runs = (
+            db.query(Run)
+            .filter(
+                Run.state.in_(
+                    [
+                        "task_intake",
+                        "plan_generated",
+                    ]
+                )
+            )
+            .order_by(
+                Run.created_at.asc()
+            )
+            .all()
+        )
+
+        run_ids = [
+            run.id
+            for run in queued_runs
+        ]
+
+    cancelled = []
+    skipped = []
+
+    for run_id in run_ids:
+
+        was_cancelled = cancel_queued_run(
+            run_id
+        )
+
+        if was_cancelled:
+            with SessionLocal() as db:
+                run = db.get(
+                    Run,
+                    run_id,
+                )
+
+                if (
+                    run
+                    and run.state not in TERMINAL
+                ):
+                    run.state = "stopped"
+                    run.error = "Cancelled while queued"
+                    run.finished_at = now()
+
+                    db.add(
+                        RunEvent(
+                            run_id=run_id,
+                            kind="control",
+                            message=(
+                                f"Queued run cancelled by admin ({role})"
+                            ),
+                        )
+                    )
+
+                    db.commit()
+
+            cancelled.append(run_id)
+
+        else:
+            skipped.append(run_id)
+
+    return {
+        "cancelled": len(cancelled),
+        "skipped": len(skipped),
+        "cancelled_run_ids": cancelled,
+        "skipped_run_ids": skipped,
+        "message": (
+            "Queued runs were cancelled safely. "
+            "Runs that had already started executing were skipped."
+        ),
+    }
+
+
+# ------------------------------------------------------------------
+# standalone pipeline stages
 
 
 @app.post("/api/extract")
 def extract(body: ExtractIn):
-    schema = get_schema(body.schema_name)
+    schema = get_schema(
+        body.schema_name
+    )
 
     html = body.html
 
     if body.snapshot_id:
         with SessionLocal() as db:
-            s = db.get(Snapshot, body.snapshot_id)
+            s = db.get(
+                Snapshot,
+                body.snapshot_id,
+            )
 
             if not s:
-                raise HTTPException(404, "Snapshot not found")
+                raise HTTPException(
+                    404,
+                    "Snapshot not found",
+                )
 
             html = open(
                 s.html_path,
@@ -1190,7 +1747,10 @@ def extract(body: ExtractIn):
     return {
         "records": [
             r.model_dump()
-            for r in validate(recs, schema.name)
+            for r in validate(
+                recs,
+                schema.name,
+            )
         ],
         "warnings": warnings,
     }
@@ -1198,10 +1758,17 @@ def extract(body: ExtractIn):
 
 def _compare_fields(task):
     sch = SCHEMAS.get(
-        WORKFLOWS.get(task.template, {}).get("schema") or ""
+        WORKFLOWS.get(
+            task.template,
+            {},
+        ).get("schema") or ""
     )
 
-    return sch.compare_fields if sch else []
+    return (
+        sch.compare_fields
+        if sch
+        else []
+    )
 
 
 def _records(db, run_id):
@@ -1215,7 +1782,9 @@ def _records(db, run_id):
         }
         for r in (
             db.query(ExtractedRecord)
-            .filter(ExtractedRecord.run_id == run_id)
+            .filter(
+                ExtractedRecord.run_id == run_id
+            )
         )
     ]
 
@@ -1223,10 +1792,16 @@ def _records(db, run_id):
 @app.post("/api/compare")
 def compare(body: CompareIn):
     with SessionLocal() as db:
-        run = db.get(Run, body.run_id)
+        run = db.get(
+            Run,
+            body.run_id,
+        )
 
         if not run:
-            raise HTTPException(404, "Run not found")
+            raise HTTPException(
+                404,
+                "Run not found",
+            )
 
         other = (
             body.against_run_id
@@ -1236,10 +1811,15 @@ def compare(body: CompareIn):
                     Run.task_id == run.task_id,
                     Run.created_at < run.created_at,
                     Run.state.in_(
-                        ["completed", "pending_review"]
+                        [
+                            "completed",
+                            "pending_review",
+                        ]
                     ),
                 )
-                .order_by(Run.created_at.desc())
+                .order_by(
+                    Run.created_at.desc()
+                )
                 .first(),
                 "id",
                 None,
@@ -1254,15 +1834,26 @@ def compare(body: CompareIn):
             }
 
         changes = compare_records(
-            _records(db, run.id),
-            _records(db, other),
-            _compare_fields(run.task),
+            _records(
+                db,
+                run.id,
+            ),
+            _records(
+                db,
+                other,
+            ),
+            _compare_fields(
+                run.task
+            ),
             run.task.template,
         )
 
         return {
             "against": other,
-            "changes": [c.__dict__ for c in changes],
+            "changes": [
+                c.__dict__
+                for c in changes
+            ],
         }
 
 
@@ -1276,13 +1867,18 @@ def complete(
     require(role, "run:write")
 
     res = compare(
-        CompareIn(run_id=body.run_id)
+        CompareIn(
+            run_id=body.run_id
+        )
     )
 
     from agents.reasoning_loop.reasoner import Change
 
     with SessionLocal() as db:
-        run = db.get(Run, body.run_id)
+        run = db.get(
+            Run,
+            body.run_id,
+        )
 
         changes = [
             Change(**c)
@@ -1291,7 +1887,9 @@ def complete(
 
         decision = Decision(
             changes=changes,
-            is_baseline=res["against"] is None,
+            is_baseline=(
+                res["against"] is None
+            ),
             needs_review=run.needs_review,
         )
 
@@ -1300,14 +1898,21 @@ def complete(
             run.task,
             changes,
             decision,
-            _records(db, run.id),
+            _records(
+                db,
+                run.id,
+            ),
         )
 
         s = (
             db.query(Summary)
-            .filter(Summary.run_id == run.id)
+            .filter(
+                Summary.run_id == run.id
+            )
             .first()
-            or Summary(run_id=run.id)
+            or Summary(
+                run_id=run.id
+            )
         )
 
         (
@@ -1334,7 +1939,8 @@ def complete(
         }
 
 
-# ------------------------------------------------------------------ live view & controls
+# ------------------------------------------------------------------
+# live view & controls
 
 
 @app.get("/api/runs/{run_id}/live")
@@ -1342,13 +1948,22 @@ def live(
     run_id: str,
     since: int = 0,
 ):
-    st = hub.state(run_id, since)
+    st = hub.state(
+        run_id,
+        since,
+    )
 
     with SessionLocal() as db:
-        r = db.get(Run, run_id)
+        r = db.get(
+            Run,
+            run_id,
+        )
 
         if not r:
-            raise HTTPException(404, "Run not found")
+            raise HTTPException(
+                404,
+                "Run not found",
+            )
 
         base = {
             "run_id": run_id,
@@ -1374,7 +1989,9 @@ def live(
     }
 
 
-@app.get("/api/runs/{run_id}/frames/{seq}.jpg")
+@app.get(
+    "/api/runs/{run_id}/frames/{seq}.jpg"
+)
 def frame(
     run_id: str,
     seq: int,
@@ -1393,7 +2010,9 @@ def frame(
     return FileResponse(
         path,
         media_type="image/jpeg",
-        headers={"Cache-Control": "max-age=86400"},
+        headers={
+            "Cache-Control": "max-age=86400"
+        },
     )
 
 
@@ -1405,7 +2024,9 @@ def control(
 ):
     require(role, "run:write")
 
-    ctl = hub.control(run_id)
+    ctl = hub.control(
+        run_id
+    )
 
     if not ctl:
         raise HTTPException(
@@ -1414,16 +2035,24 @@ def control(
         )
 
     try:
-        ctl.command(body.action)
+        ctl.command(
+            body.action
+        )
+
     except ValueError as e:
-        raise HTTPException(422, str(e))
+        raise HTTPException(
+            422,
+            str(e),
+        )
 
     with SessionLocal() as db:
         db.add(
             RunEvent(
                 run_id=run_id,
                 kind="control",
-                message=f"{body.action.title()} requested by {role}",
+                message=(
+                    f"{body.action.title()} requested by {role}"
+                ),
             )
         )
 
@@ -1441,9 +2070,14 @@ def respond(
     body: InputIn,
     role: str = Depends(current_role),
 ):
-    require(role, "plan:approve")
+    require(
+        role,
+        "plan:approve",
+    )
 
-    ctl = hub.control(run_id)
+    ctl = hub.control(
+        run_id
+    )
 
     if not ctl:
         raise HTTPException(
@@ -1456,8 +2090,12 @@ def respond(
             body.approve,
             body.note,
         )
+
     except ValueError as e:
-        raise HTTPException(409, str(e))
+        raise HTTPException(
+            409,
+            str(e),
+        )
 
     with SessionLocal() as db:
         db.add(
@@ -1487,15 +2125,26 @@ def respond(
 @app.get("/api/live")
 def live_wall():
     with SessionLocal() as db:
-        since = datetime.now(timezone.utc) - timedelta(minutes=10)
+        since = (
+            datetime.now(timezone.utc)
+            - timedelta(minutes=10)
+        )
 
         runs = (
             db.query(Run)
             .filter(
-                (Run.state.notin_(list(TERMINAL)))
-                | (Run.finished_at >= since)
+                (
+                    Run.state.notin_(
+                        list(TERMINAL)
+                    )
+                )
+                | (
+                    Run.finished_at >= since
+                )
             )
-            .order_by(Run.created_at.desc())
+            .order_by(
+                Run.created_at.desc()
+            )
             .limit(24)
             .all()
         )
@@ -1503,12 +2152,17 @@ def live_wall():
         out = []
 
         for r in runs:
-            st = hub.state(
-                r.id,
-                since=10**9,
-            ) or {}
+            st = (
+                hub.state(
+                    r.id,
+                    since=10**9,
+                )
+                or {}
+            )
 
-            cap = st.get("caption")
+            cap = st.get(
+                "caption"
+            )
 
             if r.state in (
                 "task_intake",
@@ -1528,10 +2182,17 @@ def live_wall():
                     "task_name": r.task.name,
                     "template": r.task.template,
                     "state": r.state,
-                    "seq": st.get("seq", 0),
+                    "seq": st.get(
+                        "seq",
+                        0,
+                    ),
                     "caption": cap,
-                    "url": st.get("url"),
-                    "control": st.get("control"),
+                    "url": st.get(
+                        "url"
+                    ),
+                    "control": st.get(
+                        "control"
+                    ),
                     "options": r.options or {},
                     "outcome": r.outcome or {},
                     "created_at": r.created_at.isoformat(),
@@ -1551,7 +2212,8 @@ def live_wall():
         return out
 
 
-# ------------------------------------------------------------------ feedback
+# ------------------------------------------------------------------
+# feedback
 
 
 @app.post("/api/feedback", status_code=201)
@@ -1559,7 +2221,10 @@ def feedback(
     body: FeedbackIn,
     role: str = Depends(current_role),
 ):
-    require(role, "feedback:write")
+    require(
+        role,
+        "feedback:write",
+    )
 
     if body.verdict not in (
         "accepted",
@@ -1572,7 +2237,10 @@ def feedback(
         )
 
     with SessionLocal() as db:
-        run = db.get(Run, body.run_id)
+        run = db.get(
+            Run,
+            body.run_id,
+        )
 
         if not run:
             raise HTTPException(
@@ -1631,13 +2299,16 @@ def feedback(
         )
 
 
-# ------------------------------------------------------------------ dashboard metrics
+# ------------------------------------------------------------------
+# dashboard metrics
 
 
 @app.get("/api/metrics")
 def metrics():
     with SessionLocal() as db:
-        runs = db.query(Run).all()
+        runs = db.query(
+            Run
+        ).all()
 
         done = [
             r
@@ -1654,7 +2325,9 @@ def metrics():
             )
         ]
 
-        recs = db.query(ExtractedRecord).all()
+        recs = db.query(
+            ExtractedRecord
+        ).all()
 
         fb = (
             db.query(Feedback)
@@ -1674,7 +2347,9 @@ def metrics():
 
         for e in (
             db.query(RunEvent)
-            .filter(RunEvent.kind == "error")
+            .filter(
+                RunEvent.kind == "error"
+            )
             .all()
         ):
             cat = (
@@ -1685,12 +2360,18 @@ def metrics():
             )
 
             failures[cat] = (
-                failures.get(cat, 0) + 1
+                failures.get(
+                    cat,
+                    0,
+                )
+                + 1
             )
 
         sources = {}
 
-        for s in db.query(Snapshot).all():
+        for s in db.query(
+            Snapshot
+        ).all():
             sources.setdefault(
                 s.url,
                 {
@@ -1701,10 +2382,14 @@ def metrics():
 
         for e in (
             db.query(RunEvent)
-            .filter(RunEvent.kind == "error")
+            .filter(
+                RunEvent.kind == "error"
+            )
             .all()
         ):
-            u = (e.data or {}).get("url")
+            u = (
+                e.data or {}
+            ).get("url")
 
             if u:
                 sources.setdefault(
@@ -1719,7 +2404,11 @@ def metrics():
                 )
 
                 sources[u]["failures"] = (
-                    sources[u].get("failures", 0) + 1
+                    sources[u].get(
+                        "failures",
+                        0,
+                    )
+                    + 1
                 )
 
         for e in (
@@ -1732,7 +2421,9 @@ def metrics():
             )
             .all()
         ):
-            u = (e.data or {}).get("url")
+            u = (
+                e.data or {}
+            ).get("url")
 
             if u:
                 sources.setdefault(
@@ -1747,7 +2438,8 @@ def metrics():
                     sources[u].get(
                         "layout_warnings",
                         0,
-                    ) + 1
+                    )
+                    + 1
                 )
 
         mats = (
@@ -1799,7 +2491,8 @@ def metrics():
             "low_confidence_records": sum(
                 1
                 for r in recs
-                if r.confidence < settings.min_confidence
+                if r.confidence
+                < settings.min_confidence
             ),
             "reviewer_acceptance": (
                 round(
@@ -1821,11 +2514,19 @@ def metrics():
             "source_health": sorted(
                 sources.values(),
                 key=lambda s: -(
-                    s.get("failures", 0)
-                    + s.get("layout_warnings", 0)
+                    s.get(
+                        "failures",
+                        0,
+                    )
+                    + s.get(
+                        "layout_warnings",
+                        0,
+                    )
                 ),
             ),
-            "runs_by_day": _by_day(runs),
+            "runs_by_day": _by_day(
+                runs
+            ),
         }
 
 
@@ -1854,10 +2555,14 @@ def _by_day(runs):
     )
 
 
-# ------------------------------------------------------------------ frontend
+# ------------------------------------------------------------------
+# frontend
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get(
+    "/",
+    response_class=HTMLResponse,
+)
 def index():
     with open(
         os.path.join(
